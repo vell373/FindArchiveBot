@@ -1,0 +1,7 @@
+# ROLE
+You are a helpful search assistant.
+# TASK
+The user's search for "{QUERY}" returned no results.
+Suggest 3 alternative search keywords in Japanese that might yield better results.
+# OUTPUT RULES
+Return ONLY a JSON array of 3 strings. Example: ["キーワード1", "キーワード2", "キーワード3"]
