@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: notion-mcp-discord-bot
+    env: node
+    plan: starter # 有料プランを使用（24時間常時起動）
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DISCORD_TOKEN
+        sync: false # シークレット値として設定
+      - key: DISCORD_CLIENT_ID
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: NOTION_API_KEY
+        sync: false
+      - key: NOTION_DATABASE_ID
+        sync: false
+      - key: MAX_RESULT_COUNT
+        value: "5"
+      - key: OPENAI_DEFAULT_MODEL
+        value: "gpt-3.5-turbo"
+      - key: OPENAI_KEYWORD_MODEL
+        value: "gpt-3.5-turbo-0125"
+      - key: OPENAI_RANKING_MODEL
+        value: "gpt-3.5-turbo-0125"
+      - key: OPENAI_MAX_TOKENS
+        value: "4000"
+
+# Zsdfgh

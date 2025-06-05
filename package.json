@@ -19,6 +19,9 @@
     "openai"
   ],
   "author": "",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "license": "MIT",
   "dependencies": {
     "@notionhq/client": "^3.1.3",
