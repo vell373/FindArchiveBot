@@ -43,6 +43,19 @@ export default class CacheService {
   }
 
   /**
+   * キャッシュからデータを削除
+   * @param key キャッシュキー
+   * @returns 削除に成功したかどうか
+   */
+  delete(key: string): boolean {
+    const result = this.cache.delete(key);
+    if (result) {
+      this.logger.debug(`キャッシュ削除: ${key}`);
+    }
+    return result;
+  }
+
+  /**
    * キャッシュからデータを取得
    * @param key キャッシュキー
    * @returns キャッシュされたデータ、または未設定/期限切れの場合はundefined
@@ -68,14 +81,7 @@ export default class CacheService {
     return item.data as T;
   }
 
-  /**
-   * キャッシュからデータを削除
-   * @param key キャッシュキー
-   */
-  delete(key: string): void {
-    this.cache.delete(key);
-    this.logger.debug(`キャッシュ削除: ${key}`);
-  }
+
 
   /**
    * すべてのキャッシュをクリア
