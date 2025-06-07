@@ -413,18 +413,24 @@ class NotionMCPDiscordBot {
         return;
       }
 
+      // @hereや@everyoneへのメンションは無視
+      if (message.mentions.everyone) {
+        return;
+      }
+
       // Botへのメンションかどうかを確認
       const question = this.messageParser.extractQuestion(message);
       if (!question) {
         return;
       }
 
-      logger.info('質問を受信しました', {
+      logger.info('メンションによる質問を受信しました', {
         userId: message.author.id,
         channelId: message.channelId,
         question
       });
 
+      // 処理中メッセージを送信
       const processingMessage = await this.safeReply(message, '🔍 質問を処理しています...');
       if (!processingMessage) {
         logger.error('処理中メッセージの送信に失敗しました');
@@ -438,46 +444,14 @@ class NotionMCPDiscordBot {
         tools: []
       };
       
-      // キーワードを抽出
-      const keywords = await this.gptClient.extractKeywords(searchQuery);
-      
-      if (keywords.length === 0) {
-        await this.safeMessageEdit(processingMessage, '検索キーワードを抽出できませんでした。もう少し具体的な質問をお願いします。');
-        return;
-      }
-
-      logger.info('キーワードを抽出しました', { keywords });
-
-      // Notionで検索
-      const results = await this.notionClient.searchSeminars(keywords, [], []);
-
-      if (results.length === 0) {
-        // 代替キーワードを提案
-        const searchQueryObj = { queryText: question, categories: [], tools: [] };
-        const alternativeKeywords = await this.gptClient.suggestAlternativeKeywords(searchQueryObj);
-        const alternativesText = alternativeKeywords.map(kw => `・${kw}`).join('\n');
-        
-        await this.safeMessageEdit(
-          processingMessage, 
-          `申し訳ありませんが、「${question}」に関連するセミナーが見つかりませんでした。\n\n以下のキーワードで試してみてください:\n${alternativesText}`
-        );
-        return;
-      }
-
-      // 検索結果をランク付け
-      const searchQueryObj = { queryText: question, categories: [], tools: [] };
-      const rankedResults = await this.gptClient.rankSearchResults(searchQueryObj, results);
-      
-      // 上位5件までを表示
-      const topResults = rankedResults.slice(0, 5);
-      
-      // 結果を整形して返信
-      const formattedResponse = this.formatter.formatSearchResults(question, topResults);
-      
-      await this.safeMessageEdit(processingMessage, formattedResponse);
-      
-      logger.info('回答を送信しました', {
-        resultCount: topResults.length
+      // SeminarCommandを使用して検索を実行
+      // メッセージオブジェクトをラップして、SeminarCommandで処理できるようにする
+      await this.seminarCommand.handleMentionSearch(searchQuery, {
+        message: processingMessage,
+        originalMessage: message,
+        updateMessage: async (content: string) => {
+          await this.safeMessageEdit(processingMessage, content);
+        }
       });
     } catch (error) {
       const appError = errorHandler.handle(error);

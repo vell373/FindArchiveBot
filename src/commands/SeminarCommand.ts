@@ -268,6 +268,77 @@ export default class SeminarCommand {
    * @param selectedCategories - ユーザーが選択したカテゴリ
    * @param selectedTools - ユーザーが選択したツール
    */
+  /**
+   * メンションによる検索を処理するメソッド
+   * @param searchQuery 検索クエリ
+   * @param context メッセージコンテキスト
+   */
+  async handleMentionSearch(
+    searchQuery: SearchQuery,
+    context: {
+      message: any; // 処理中メッセージ
+      originalMessage: any; // 元のメッセージ
+      updateMessage: (content: string) => Promise<void>; // メッセージ更新用コールバック
+    }
+  ): Promise<void> {
+    try {
+      this.logger.info('メンションによる検索を実行します', {
+        userId: context.originalMessage.author.id,
+        queryText: searchQuery.queryText
+      });
+
+      // キーワードを抽出
+      const keywords = await this.gptClient.extractKeywords(searchQuery);
+      
+      if (keywords.length === 0) {
+        await context.updateMessage('検索キーワードを抽出できませんでした。もう少し具体的な質問をお願いします。');
+        return;
+      }
+
+      this.logger.info('キーワードを抽出しました', { keywords });
+
+      // Notionで検索
+      const results = await this.notionClient.searchSeminars(keywords, [], []);
+
+      if (results.length === 0) {
+        // 代替キーワードを提案
+        const alternativeKeywords = await this.gptClient.suggestAlternativeKeywords(searchQuery);
+        const alternativesText = alternativeKeywords.map(kw => `・${kw}`).join('\n');
+        
+        await context.updateMessage(
+          `申し訳ありませんが、「${searchQuery.queryText}」に関連するセミナーが見つかりませんでした。\n\n以下のキーワードで試してみてください:\n${alternativesText}`
+        );
+        return;
+      }
+
+      // 検索結果をランク付け
+      const rankedResults = await this.gptClient.rankSearchResults(searchQuery, results);
+      
+      // 環境変数から表示件数を取得するか、デフォルト値を使用
+      const maxResultCount = parseInt(process.env.MAX_RESULT_COUNT || '5', 10);
+      const topResults = rankedResults.slice(0, maxResultCount);
+      
+      // 結果を整形して返信
+      const formattedResponse = this.formatter.formatSearchResults(searchQuery.queryText, topResults);
+      
+      await context.updateMessage(formattedResponse);
+      
+      this.logger.info('メンション検索の回答を送信しました', {
+        resultCount: topResults.length
+      });
+    } catch (error) {
+      const appError = this.errorHandler.handle(error);
+      this.logger.error(`メンション検索処理エラー: ${appError.message}`, appError.originalError);
+      
+      try {
+        const errorMessage = this.errorHandler.getUserFriendlyMessage(appError);
+        await context.updateMessage(`検索中にエラーが発生しました: ${errorMessage}`);
+      } catch (replyError) {
+        this.logger.error('エラーメッセージの送信に失敗しました', replyError instanceof Error ? replyError : new Error(String(replyError)));
+      }
+    }
+  }
+
   async executeSearchWithSelections(
     interaction: ModalSubmitInteraction | CommandInteraction | any, // ButtonInteraction や StringSelectMenuInteraction を含むように調整
     queryText: string,
