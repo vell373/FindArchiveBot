@@ -99,6 +99,43 @@ class NotionMCPDiscordBot {
       this.gptClient,
       this.cacheService
     );
+
+    // カテゴリとツールの選択肢を定期的に更新する処理を設定
+    this.setupCategoryAndToolsPolling();
+  }
+  
+  /**
+   * カテゴリとツールの選択肢を定期的に更新する
+   */
+  private setupCategoryAndToolsPolling(): void {
+    const POLLING_INTERVAL = 600000; // 10分ごと
+    
+    logger.info('カテゴリとツールの自動更新を設定しました', { interval: `${POLLING_INTERVAL / 60000}分` });
+    
+    setInterval(async () => {
+      try {
+        // 現在のキャッシュを取得
+        const cachedCategories = this.cacheService.get<string[]>('seminar:categories');
+        const cachedTools = this.cacheService.get<string[]>('seminar:tools');
+        
+        // 最新のデータを取得
+        const latestCategories = await this.notionClient.getCategories();
+        const latestTools = await this.notionClient.getTools();
+        
+        // 変更があればキャッシュを更新
+        if (!cachedCategories || JSON.stringify(cachedCategories) !== JSON.stringify(latestCategories)) {
+          this.cacheService.set('seminar:categories', latestCategories, 3600000);
+          logger.info('カテゴリ選択肢を更新しました', { count: latestCategories.length });
+        }
+        
+        if (!cachedTools || JSON.stringify(cachedTools) !== JSON.stringify(latestTools)) {
+          this.cacheService.set('seminar:tools', latestTools, 3600000);
+          logger.info('ツール選択肢を更新しました', { count: latestTools.length });
+        }
+      } catch (error) {
+        logger.error('選択肢の自動更新に失敗しました', error instanceof Error ? error : new Error(String(error)));
+      }
+    }, POLLING_INTERVAL);
   }
 
   /**
@@ -133,7 +170,7 @@ class NotionMCPDiscordBot {
       logger.info('スラッシュコマンドを登録しています');
       
       const commands = [
-        this.seminarCommand.getCommandDefinition().toJSON()
+        this.seminarCommand.getCommandDefinition().toJSON(),
       ];
       
       const rest = new REST().setToken(process.env.DISCORD_TOKEN!);
@@ -190,12 +227,69 @@ class NotionMCPDiscordBot {
     process.on('SIGTERM', () => this.shutdown());
   }
 
-
-
   /**
    * メッセージ作成イベントを処理
    * @param message - メッセージデータ
    */
+  private async handleMessageCreate(message: Message): Promise<void> {
+    try {
+      // ボット自身のメッセージは無視
+      if (message.author.bot) return;
+      
+      // @hereや@everyoneへのメンションは無視
+      if (message.mentions.everyone) return;
+      
+      // ボットへのメンションかどうかを確認
+      const question = this.messageParser.extractQuestion(message);
+      if (!question) return;
+      
+      logger.info('メンションによる質問を受信しました', {
+        userId: message.author.id,
+        channelId: message.channelId,
+        question
+      });
+      
+      // 処理中メッセージを送信
+      const processingMessage = await this.safeReply(message, '🔍 質問を処理しています...');
+      if (!processingMessage) {
+        logger.error('処理中メッセージの送信に失敗しました');
+        return;
+      }
+      
+      // 検索クエリを構築
+      const searchQuery: SearchQuery = {
+        queryText: question,
+        categories: [],
+        tools: []
+      };
+      
+      // SeminarCommandを使用して検索を実行
+      await this.seminarCommand.handleMentionSearch(searchQuery, {
+        message: processingMessage,
+        originalMessage: message,
+        updateMessage: async (content: string) => {
+          await this.safeMessageEdit(processingMessage, content);
+        }
+      });
+    } catch (error) {
+      const appError = errorHandler.handle(error);
+      logger.error(`メッセージ処理エラー: ${appError.message}`, appError.originalError);
+      
+      try {
+        // レート制限エラーの場合は少し待機してから再試行
+        if (appError.type === ErrorType.DISCORD_RATE_LIMIT) {
+          logger.info('Discordレート制限を検出、待機してから再試行します');
+          await new Promise(resolve => setTimeout(resolve, 5000)); // 5秒待機
+        }
+        
+        const errorMessage = errorHandler.getUserFriendlyMessage(appError);
+        await this.safeReply(message, errorMessage);
+      } catch (replyError) {
+        logger.error('エラーメッセージの送信に失敗しました', replyError instanceof Error ? replyError : new Error(String(replyError)));
+      }
+    }
+  }
+  
   /**
    * インタラクションイベントを処理
    * @param interaction - インタラクションデータ
@@ -406,71 +500,7 @@ class NotionMCPDiscordBot {
     }
   }
 
-  private async handleMessageCreate(message: Message): Promise<void> {
-    try {
-      // 自分自身のメッセージは無視
-      if (message.author.bot) {
-        return;
-      }
-
-      // @hereや@everyoneへのメンションは無視
-      if (message.mentions.everyone) {
-        return;
-      }
-
-      // Botへのメンションかどうかを確認
-      const question = this.messageParser.extractQuestion(message);
-      if (!question) {
-        return;
-      }
-
-      logger.info('メンションによる質問を受信しました', {
-        userId: message.author.id,
-        channelId: message.channelId,
-        question
-      });
-
-      // 処理中メッセージを送信
-      const processingMessage = await this.safeReply(message, '🔍 質問を処理しています...');
-      if (!processingMessage) {
-        logger.error('処理中メッセージの送信に失敗しました');
-        return;
-      }
-
-      // 検索クエリを構築
-      const searchQuery: SearchQuery = {
-        queryText: question,
-        categories: [],
-        tools: []
-      };
-      
-      // SeminarCommandを使用して検索を実行
-      // メッセージオブジェクトをラップして、SeminarCommandで処理できるようにする
-      await this.seminarCommand.handleMentionSearch(searchQuery, {
-        message: processingMessage,
-        originalMessage: message,
-        updateMessage: async (content: string) => {
-          await this.safeMessageEdit(processingMessage, content);
-        }
-      });
-    } catch (error) {
-      const appError = errorHandler.handle(error);
-      logger.error(`メッセージ処理エラー: ${appError.message}`, appError.originalError);
-
-      try {
-        // レート制限エラーの場合は少し待機してから再試行
-        if (appError.type === ErrorType.DISCORD_RATE_LIMIT) {
-          logger.info('Discordレート制限を検出、待機してから再試行します');
-          await new Promise(resolve => setTimeout(resolve, 5000)); // 5秒待機
-        }
-        
-        const errorMessage = errorHandler.getUserFriendlyMessage(appError);
-        await this.safeReply(message, errorMessage);
-      } catch (replyError) {
-        logger.error('エラーメッセージの送信に失敗しました', replyError instanceof Error ? replyError : new Error(String(replyError)));
-      }
-    }
-  }
+  // handleMessageCreateメソッドは上部に既に定義されているため、ここの重複した定義を削除
 
   /**
    * Botをシャットダウン
