@@ -27,6 +27,7 @@ import Logger from './utils/Logger';
 import ErrorHandler, { AppError, ErrorType } from './utils/ErrorHandler';
 import CacheService from './services/CacheService';
 import SeminarCommand from './commands/SeminarCommand';
+import AdminCommand from './commands/AdminCommand';
 import { SearchQuery } from './models/SearchQuery';
 import { SeminarRecord, RankedSeminarRecord } from './models/SeminarRecord';
 
@@ -67,6 +68,7 @@ class NotionMCPDiscordBot {
   private formatter: Formatter;
   private cacheService: CacheService;
   private seminarCommand: SeminarCommand;
+  private adminCommand: AdminCommand;
   private applicationId: string = '';
   private botId: string = '';
 
@@ -99,7 +101,13 @@ class NotionMCPDiscordBot {
       this.gptClient,
       this.cacheService
     );
-
+    
+    // 管理者コマンドを初期化
+    this.adminCommand = new AdminCommand(
+      this.notionClient,
+      this.cacheService
+    );
+    
     // カテゴリとツールの選択肢を定期的に更新する処理を設定
     this.setupCategoryAndToolsPolling();
   }
@@ -171,6 +179,7 @@ class NotionMCPDiscordBot {
       
       const commands = [
         this.seminarCommand.getCommandDefinition().toJSON(),
+        this.adminCommand.getCommandDefinition().toJSON()
       ];
       
       const rest = new REST().setToken(process.env.DISCORD_TOKEN!);
@@ -207,7 +216,8 @@ class NotionMCPDiscordBot {
     });
     
     // インタラクションイベントのハンドラー
-    this.client.on(Events.InteractionCreate, (interaction) => {
+    this.client.on(Events.InteractionCreate, async interaction => {
+      console.log(`[DEBUG] InteractionCreate event received. Type: ${interaction.type}, CustomID: ${'customId' in interaction ? interaction.customId : 'N/A'}`);
       this.handleInteraction(interaction);
     });
 
@@ -227,69 +237,12 @@ class NotionMCPDiscordBot {
     process.on('SIGTERM', () => this.shutdown());
   }
 
+
+
   /**
    * メッセージ作成イベントを処理
    * @param message - メッセージデータ
    */
-  private async handleMessageCreate(message: Message): Promise<void> {
-    try {
-      // ボット自身のメッセージは無視
-      if (message.author.bot) return;
-      
-      // @hereや@everyoneへのメンションは無視
-      if (message.mentions.everyone) return;
-      
-      // ボットへのメンションかどうかを確認
-      const question = this.messageParser.extractQuestion(message);
-      if (!question) return;
-      
-      logger.info('メンションによる質問を受信しました', {
-        userId: message.author.id,
-        channelId: message.channelId,
-        question
-      });
-      
-      // 処理中メッセージを送信
-      const processingMessage = await this.safeReply(message, '🔍 質問を処理しています...');
-      if (!processingMessage) {
-        logger.error('処理中メッセージの送信に失敗しました');
-        return;
-      }
-      
-      // 検索クエリを構築
-      const searchQuery: SearchQuery = {
-        queryText: question,
-        categories: [],
-        tools: []
-      };
-      
-      // SeminarCommandを使用して検索を実行
-      await this.seminarCommand.handleMentionSearch(searchQuery, {
-        message: processingMessage,
-        originalMessage: message,
-        updateMessage: async (content: string) => {
-          await this.safeMessageEdit(processingMessage, content);
-        }
-      });
-    } catch (error) {
-      const appError = errorHandler.handle(error);
-      logger.error(`メッセージ処理エラー: ${appError.message}`, appError.originalError);
-      
-      try {
-        // レート制限エラーの場合は少し待機してから再試行
-        if (appError.type === ErrorType.DISCORD_RATE_LIMIT) {
-          logger.info('Discordレート制限を検出、待機してから再試行します');
-          await new Promise(resolve => setTimeout(resolve, 5000)); // 5秒待機
-        }
-        
-        const errorMessage = errorHandler.getUserFriendlyMessage(appError);
-        await this.safeReply(message, errorMessage);
-      } catch (replyError) {
-        logger.error('エラーメッセージの送信に失敗しました', replyError instanceof Error ? replyError : new Error(String(replyError)));
-      }
-    }
-  }
-  
   /**
    * インタラクションイベントを処理
    * @param interaction - インタラクションデータ
@@ -300,6 +253,8 @@ class NotionMCPDiscordBot {
       if (interaction.isChatInputCommand()) {
         if (interaction.commandName === 'seminar') {
           await this.seminarCommand.execute(interaction);
+        } else if (interaction.commandName === 'admin') {
+          await this.adminCommand.execute(interaction);
         }
       }
       
@@ -313,7 +268,7 @@ class NotionMCPDiscordBot {
       // セレクトメニュー選択
       if (interaction.isStringSelectMenu()) {
         const customId = interaction.customId;
-        if (customId.startsWith('seminar_category_select:') || customId.startsWith('seminar_tool_select:')) {
+        if (customId.startsWith('seminar_category_select_') || customId.startsWith('seminar_tool_select_')) {
           // セレクトメニューの選択を処理
           await this.handleSelectMenuInteraction(interaction);
         }
@@ -357,53 +312,107 @@ class NotionMCPDiscordBot {
    * @param interaction - セレクトメニューインタラクション
    */
   private async handleSelectMenuInteraction(interaction: StringSelectMenuInteraction): Promise<void> {
+    console.log(`[DEBUG] handleSelectMenuInteraction: Entered. CustomID: ${interaction.customId}, User: ${interaction.user.id}`);
     try {
+      // ❶ 先頭で ACK（3 秒制限を確実に回避）
+      await interaction.deferUpdate().catch((err) => {
+        // deferUpdate自体が失敗するケースも考慮（例: interactionが既に終了しているなど）
+        logger.warn('deferUpdate failed at the beginning of handleSelectMenuInteraction', { 
+          error: err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : JSON.stringify(err),
+          customId: interaction.customId,
+          userId: interaction.user.id
+        });
+        // deferUpdateが失敗した場合、これ以上処理を続けても Discord への応答は期待できないため、早期リターン
+        // この場合、ユーザーには「インタラクションに失敗しました」が表示される可能性が高い
+        console.error(`[DEBUG] handleSelectMenuInteraction: Initial deferUpdate failed for ${interaction.customId}. Aborting.`);
+        return;
+      });
+      console.log(`[DEBUG] handleSelectMenuInteraction: Initial deferUpdate successful for ${interaction.customId}`);
+
+      // ❷ 以降で例外が出ても Discord には応答済み
       // カスタムIDからメッセージIDを抽出
       const parts = interaction.customId.split(':');
       const messageId = parts[1];
+      console.log(`[DEBUG] handleSelectMenuInteraction: Extracted messageId: ${messageId}`);
       
       // キャッシュから現在の状態を取得
       const cacheKey = `seminar_state:${interaction.user.id}:${messageId}`;
+      console.log(`[DEBUG] handleSelectMenuInteraction: Attempting to get state from cache. Key: ${cacheKey}`);
       const state = this.cacheService.get<any>(cacheKey);
       
       if (!state) {
-        await interaction.reply({ content: 'セッションがタイムアウトしました。もう一度検索を行ってください。', ephemeral: true });
+        logger.warn('State not found in cache for select menu interaction.', { cacheKey, customId: interaction.customId, userId: interaction.user.id });
+        console.log(`[DEBUG] handleSelectMenuInteraction: State not found in cache for key ${cacheKey}. Sending followUp.`);
+        // deferUpdate済みなので、followUpでユーザーに通知
+        await interaction.followUp({ content: 'セッションがタイムアウトしました。もう一度検索を行ってください。', ephemeral: true });
         return;
       }
+      console.log(`[DEBUG] handleSelectMenuInteraction: State found in cache. State: ${JSON.stringify(state)}`);
       
       // 選択された値を取得
       const selectedValues = interaction.values;
+      console.log(`[DEBUG] handleSelectMenuInteraction: Selected values: ${JSON.stringify(selectedValues)}`);
       
       // カテゴリかツールかを判定
-      if (interaction.customId.startsWith('seminar_category_select:')) {
-        // カテゴリ選択の場合
-        state.selectedCategories = selectedValues;
-      } else if (interaction.customId.startsWith('seminar_tool_select:')) {
-        // ツール選択の場合
-        state.selectedTools = selectedValues;
+      const customIdPrefix = parts[0]; // メッセージIDの前の部分を取得 (seminar_category_select_X or seminar_tool_select_X)
+      console.log(`[DEBUG] handleSelectMenuInteraction: CustomID prefix: ${customIdPrefix}`);
+      
+      if (customIdPrefix.startsWith('seminar_category_select_')) {
+        const currentCategories = state.selectedCategories || [];
+        state.selectedCategories = [...new Set([...currentCategories, ...selectedValues])];
+        console.log(`[DEBUG] handleSelectMenuInteraction: Updated categories. New state: ${JSON.stringify(state.selectedCategories)}`);
+        logger.info('カテゴリが選択されました', { 
+          menuId: customIdPrefix,
+          selectedValues,
+          userId: interaction.user.id,
+          allCategories: state.selectedCategories 
+        });
+      } else if (customIdPrefix.startsWith('seminar_tool_select_')) {
+        const currentTools = state.selectedTools || [];
+        state.selectedTools = [...new Set([...currentTools, ...selectedValues])];
+        console.log(`[DEBUG] handleSelectMenuInteraction: Updated tools. New state: ${JSON.stringify(state.selectedTools)}`);
+        logger.info('ツールが選択されました', { 
+          menuId: customIdPrefix,
+          selectedValues,
+          userId: interaction.user.id,
+          allTools: state.selectedTools 
+        });
+      } else {
+        logger.warn('Unknown select menu customId prefix', { customId: interaction.customId, prefix: customIdPrefix });
+        console.log(`[DEBUG] handleSelectMenuInteraction: Unknown customId prefix: ${customIdPrefix}`);
+        // 不明なIDだが、インタラクション自体は deferUpdate で応答済みなので、ここでは何もしないか、エラーをログに残す程度
       }
       
       // 更新した状態をキャッシュに保存
+      console.log(`[DEBUG] handleSelectMenuInteraction: Attempting to set state in cache. Key: ${cacheKey}, New State: ${JSON.stringify(state)}`);
       this.cacheService.set(cacheKey, state, 900000); // 15分
+      console.log(`[DEBUG] handleSelectMenuInteraction: State set in cache successfully.`);
       
-      // ユーザーに選択が反映されたことを伝える
-      await interaction.deferUpdate();
+      // ★★★ 元々あった2回目の deferUpdate() は削除 ★★★
+      // 最初の deferUpdate() でインタラクションは既に確認応答されているため、
+      // ここで再度 deferUpdate() を呼ぶとエラーになるか、予期せぬ動作を引き起こす可能性がある。
+      // 選択メニューの内容自体をこのインタラクションで変更しない限り、追加の応答は不要。
       
-      logger.info('セレクトメニュー選択を処理しました', {
+      logger.info('セレクトメニュー選択を正常に処理しました', {
         userId: interaction.user.id,
         customId: interaction.customId,
-        selectedValues
+        selectedValues,
+        finalState: state
       });
+      console.log(`[DEBUG] handleSelectMenuInteraction: Processing finished successfully for ${interaction.customId}`);
       
     } catch (error) {
-      const appError = errorHandler.handle(error);
-      logger.error(`セレクトメニュー処理エラー: ${appError.message}`, appError.originalError);
-      
-      if (!interaction.replied && !interaction.deferred) {
-        await interaction.reply({ content: '選択の処理中にエラーが発生しました。', ephemeral: true });
-      } else {
-        await interaction.followUp({ content: '選択の処理中にエラーが発生しました。', ephemeral: true });
-      }
+      const errorDetails = error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : JSON.stringify(error);
+      logger.error('Critical error in handleSelectMenuInteraction', { 
+        error: errorDetails,
+        customId: interaction.customId, 
+        values: interaction.values,
+        userId: interaction.user.id
+      });
+      console.error(`[DEBUG] handleSelectMenuInteraction: CRITICAL ERROR for ${interaction.customId}. Error: ${JSON.stringify(errorDetails)}`);
+      // 既に deferUpdate 済みなので、ユーザーへの追加の応答は原則不要。
+      // もし followUp でエラーを通知したい場合は、interaction.replied や interaction.deferred を確認した上で慎重に行う。
+      // ここでは、致命的なエラーとしてログに残す。
     }
   }
 
@@ -500,7 +509,71 @@ class NotionMCPDiscordBot {
     }
   }
 
-  // handleMessageCreateメソッドは上部に既に定義されているため、ここの重複した定義を削除
+  private async handleMessageCreate(message: Message): Promise<void> {
+    try {
+      // 自分自身のメッセージは無視
+      if (message.author.bot) {
+        return;
+      }
+
+      // @hereや@everyoneへのメンションは無視
+      if (message.mentions.everyone) {
+        return;
+      }
+
+      // Botへのメンションかどうかを確認
+      const question = this.messageParser.extractQuestion(message);
+      if (!question) {
+        return;
+      }
+
+      logger.info('メンションによる質問を受信しました', {
+        userId: message.author.id,
+        channelId: message.channelId,
+        question
+      });
+
+      // 処理中メッセージを送信
+      const processingMessage = await this.safeReply(message, '🔍 質問を処理しています...');
+      if (!processingMessage) {
+        logger.error('処理中メッセージの送信に失敗しました');
+        return;
+      }
+
+      // 検索クエリを構築
+      const searchQuery: SearchQuery = {
+        queryText: question,
+        categories: [],
+        tools: []
+      };
+      
+      // SeminarCommandを使用して検索を実行
+      // メッセージオブジェクトをラップして、SeminarCommandで処理できるようにする
+      await this.seminarCommand.handleMentionSearch(searchQuery, {
+        message: processingMessage,
+        originalMessage: message,
+        updateMessage: async (content: string) => {
+          await this.safeMessageEdit(processingMessage, content);
+        }
+      });
+    } catch (error) {
+      const appError = errorHandler.handle(error);
+      logger.error(`メッセージ処理エラー: ${appError.message}`, appError.originalError);
+
+      try {
+        // レート制限エラーの場合は少し待機してから再試行
+        if (appError.type === ErrorType.DISCORD_RATE_LIMIT) {
+          logger.info('Discordレート制限を検出、待機してから再試行します');
+          await new Promise(resolve => setTimeout(resolve, 5000)); // 5秒待機
+        }
+        
+        const errorMessage = errorHandler.getUserFriendlyMessage(appError);
+        await this.safeReply(message, errorMessage);
+      } catch (replyError) {
+        logger.error('エラーメッセージの送信に失敗しました', replyError instanceof Error ? replyError : new Error(String(replyError)));
+      }
+    }
+  }
 
   /**
    * Botをシャットダウン

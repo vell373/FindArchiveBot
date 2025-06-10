@@ -96,21 +96,31 @@ export default class NotionClient {
 
       // カテゴリフィルタ（選択されている場合のみ）
       if (categories.length > 0) {
-        filter.and.push({
+        // 複数のカテゴリが選択されている場合は、OR条件で検索
+        const categoryFilters = categories.map(category => ({
           property: 'カテゴリ',
           multi_select: {
-            contains: categories[0] // 最初のカテゴリで検索
+            contains: category
           }
+        }));
+
+        filter.and.push({
+          or: categoryFilters
         });
       }
 
       // ツールフィルタ（選択されている場合のみ）
       if (tools.length > 0) {
-        filter.and.push({
+        // 複数のツールが選択されている場合は、OR条件で検索
+        const toolFilters = tools.map(tool => ({
           property: '使用ツール',
           multi_select: {
-            contains: tools[0] // 最初のツールで検索
+            contains: tool
           }
+        }));
+
+        filter.and.push({
+          or: toolFilters
         });
       }
 
