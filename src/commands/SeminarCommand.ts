@@ -77,17 +77,15 @@ export default class SeminarCommand {
    * @param interaction コマンドインタラクション
    */
   async execute(interaction: CommandInteraction): Promise<void> {
+    console.log(`[DEBUG] SeminarCommand.execute called. User: ${interaction.user.id}`);
     try {
       this.logger.info('セミナーコマンドが実行されました', {
         userId: interaction.user.id,
         channelId: interaction.channelId
       });
 
-      // カテゴリとツールのリストを取得（キャッシュから、なければAPIから）
-      const categories = await this.getCategories();
-      const tools = await this.getTools();
-
       // モーダルを構築して表示 (キーワード入力専用)
+      // カテゴリとツールはモーダル送信後に取得する
       const modal = this.modalBuilder.buildSeminarSearchModal();
       await interaction.showModal(modal);
 
@@ -115,10 +113,18 @@ export default class SeminarCommand {
    * @param interaction モーダル送信インタラクション
    */
   async handleModalSubmit(interaction: ModalSubmitInteraction): Promise<void> {
+    console.log(`[DEBUG] SeminarCommand.handleModalSubmit called. User: ${interaction.user.id}, CustomID: ${interaction.customId}`);
     try {
-      // モーダル送信は一時的なものなので、deferUpdate() を使うか、すぐにeditReplyで内容を更新する
+      // インタラクションタイプはすでにModalSubmitInteractionとして渡されているので
+      // 追加のチェックは不要です
+
+      // モーダル送信は一時的なものなので、deferReply() を使って応答時間を延長
       // 全ユーザーに表示するためにephemeralをfalseに設定
-      await interaction.deferReply({ ephemeral: false });
+      await interaction.deferReply({ ephemeral: false })
+        .catch(err => {
+          this.logger.error('インタラクション応答延長エラー', { error: err });
+          // エラーを無視して続行（すでに応答済みの可能性）
+        });
 
       this.logger.info('セミナー検索モーダルが送信されました（キーワード入力段階）', {
         userId: interaction.user.id,
@@ -130,66 +136,127 @@ export default class SeminarCommand {
       const { queryText } = this.modalBuilder.extractSearchQueryFromModal(interaction);
 
       if (!queryText || queryText.trim().length === 0) {
-        await interaction.editReply({ content: '検索キーワードが入力されていません。' });
+        await interaction.editReply({ content: '検索キーワードが入力されていません。' })
+          .catch(err => {
+            this.logger.error('空のキーワードエラー応答中にエラーが発生しました', { error: err });
+          });
         return;
       }
 
       this.logger.info('キーワードを受け付けました', { queryText });
 
       // コンポーネントを含むメッセージを送信し、そのメッセージIDを取得
-      // editReplyはPromise<Message>を返すので、それをawaitする
-      const replyMessage = await interaction.editReply({
-        content: `キーワード「${queryText}」について、カテゴリとツールを選択してください。`,
-        components: [], // 一旦空で送信し、後でIDを使って更新するわけではない。最初からコンポーネントを含める。
-      });
-      const messageId = replyMessage.id; 
+      let messageId = '';
+      let replyMessage;
+      try {
+        replyMessage = await interaction.editReply({
+          content: `キーワード「${queryText}」について、カテゴリとツールを選択してください。`,
+          components: [], // 一旦空で送信します
+        });
+        messageId = replyMessage.id;
+      } catch (err) {
+        this.logger.error('初期メッセージ更新中に重大なエラーが発生しました (messageId取得箇所)', { 
+          error: err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : JSON.stringify(err),
+          userId: interaction.user.id,
+          guildId: interaction.guildId,
+          channelId: interaction.channelId,
+          customId: interaction.customId, // modal customId
+          queryText: queryText,
+          attemptedContent: `キーワード「${queryText}」について、カテゴリとツールを選択してください。`
+        });
+        // エラーが発生した場合は処理を終了します。この時点でユーザーには Discord の標準エラーか、
+        // deferReply が成功していればその応答が見えているはずです。
+        // ここで followUp すると新しいメッセージになるため、ログ出力に留めます。
+        return;
+      }
 
       // 初期状態をキャッシュに保存
       const initialState = { queryText, selectedCategories: [], selectedTools: [] };
       this.cacheService.set(`seminar_state:${interaction.user.id}:${messageId}`, initialState, this.INTERACTION_STATE_CACHE_TTL);
       this.logger.info('初期インタラクション状態をキャッシュに保存しました', { userId: interaction.user.id, messageId, queryText });
 
-      if (!queryText || queryText.trim().length === 0) {
-        await interaction.editReply({ content: '検索キーワードが入力されていません。' });
-        return;
-      }
-
-      this.logger.info('キーワードを受け付けました', { queryText });
-
       // カテゴリとツールのリストを取得
       const categories = await this.getCategories();
       const tools = await this.getTools();
 
-      // カテゴリ選択メニュー
-      const categorySelect = new StringSelectMenuBuilder()
-        .setCustomId(`seminar_category_select:${messageId}`)
-        .setPlaceholder('カテゴリを選択（複数可）')
-        .setMinValues(0)
-        .setMaxValues(Math.min(categories.length > 0 ? categories.length : 1, 5));
-      if (categories.length > 0) {
+      // 全てのコンポーネント行を格納する配列
+      const componentRows: ActionRowBuilder<any>[] = [];
+      
+      // Discord.jsの制限
+      const MAX_OPTIONS_PER_MENU = 25; // 1つのメニューに最大25個のオプション
+      const MAX_COMPONENT_ROWS = 4; // 最大5行（ボタン用に1行確保するので4行）
+      
+      // カテゴリを複数の選択メニューに分割
+      let categoryRowCount = 0;
+      // DEBUG: カテゴリメニューを1つに制限
+    for (let i = 0; i < Math.ceil(categories.length / MAX_OPTIONS_PER_MENU) && categoryRowCount < MAX_COMPONENT_ROWS; i++) {
+        const categoryChunk = categories.slice(i * MAX_OPTIONS_PER_MENU, (i + 1) * MAX_OPTIONS_PER_MENU);
+        if (categoryChunk.length === 0) continue;
+        
+        const categorySelect = new StringSelectMenuBuilder()
+          .setCustomId(`seminar_category_select_${i}:${messageId}`)
+          .setPlaceholder(`カテゴリ ${i+1}（${categoryChunk.length}件）`)
+          .setMinValues(0)
+          .setMaxValues(categoryChunk.length);
+        
         categorySelect.addOptions(
-          categories.slice(0, 25).map(cat => 
+          categoryChunk.map(cat => 
             new StringSelectMenuOptionBuilder().setLabel(cat).setValue(cat)
           )
         );
-      } else {
-        categorySelect.addOptions(new StringSelectMenuOptionBuilder().setLabel('カテゴリなし').setValue('no_category_placeholder')).setDisabled(true);
+        
+        componentRows.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(categorySelect));
+        categoryRowCount++;
       }
-
-      // ツール選択メニュー
-      const toolSelect = new StringSelectMenuBuilder()
-        .setCustomId(`seminar_tool_select:${messageId}`)
-        .setPlaceholder('ツールを選択（複数可）')
-        .setMinValues(0)
-        .setMaxValues(Math.min(tools.length > 0 ? tools.length : 1, 5));
-      if (tools.length > 0) {
+      
+      // カテゴリがない場合のダミー行
+      if (categoryRowCount === 0) {
+        const dummyCategorySelect = new StringSelectMenuBuilder()
+          .setCustomId(`seminar_category_select_0:${messageId}`)
+          .setPlaceholder('カテゴリなし')
+          .setMinValues(0)
+          .setMaxValues(1)
+          .setDisabled(true)
+          .addOptions(new StringSelectMenuOptionBuilder().setLabel('カテゴリなし').setValue('no_category_placeholder'));
+        
+        componentRows.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(dummyCategorySelect));
+        categoryRowCount++;
+      }
+      
+      // ツールを複数の選択メニューに分割
+      const remainingRows = MAX_COMPONENT_ROWS - categoryRowCount;
+      // DEBUG: ツールメニューを1つに制限 (remainingRows の代わりに 1 を使用)
+    for (let i = 0; i < Math.ceil(tools.length / MAX_OPTIONS_PER_MENU) && i < remainingRows; i++) {
+        const toolChunk = tools.slice(i * MAX_OPTIONS_PER_MENU, (i + 1) * MAX_OPTIONS_PER_MENU);
+        if (toolChunk.length === 0) continue;
+        
+        const toolSelect = new StringSelectMenuBuilder()
+          .setCustomId(`seminar_tool_select_${i}:${messageId}`)
+          .setPlaceholder(`ツール ${i+1}（${toolChunk.length}件）`)
+          .setMinValues(0)
+          .setMaxValues(toolChunk.length);
+        
         toolSelect.addOptions(
-          tools.slice(0, 25).map(tool => 
+          toolChunk.map(tool => 
             new StringSelectMenuOptionBuilder().setLabel(tool).setValue(tool)
           )
         );
-      } else {
-        toolSelect.addOptions(new StringSelectMenuOptionBuilder().setLabel('ツールなし').setValue('no_tool_placeholder')).setDisabled(true);
+        
+        componentRows.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(toolSelect));
+      }
+      
+      // ツールがない場合のダミー行
+      let toolCount = componentRows.length - categoryRowCount;
+      if (toolCount === 0 && remainingRows > 0) {
+        const dummyToolSelect = new StringSelectMenuBuilder()
+          .setCustomId(`seminar_tool_select_0:${messageId}`)
+          .setPlaceholder('ツールなし')
+          .setMinValues(0)
+          .setMaxValues(1)
+          .setDisabled(true)
+          .addOptions(new StringSelectMenuOptionBuilder().setLabel('ツールなし').setValue('no_tool_placeholder'));
+        
+        componentRows.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(dummyToolSelect));
       }
 
       // 検索実行ボタン
@@ -203,15 +270,46 @@ export default class SeminarCommand {
         .setLabel('キャンセル')
         .setStyle(ButtonStyle.Secondary);
 
-      const categoryRow = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(categorySelect);
-      const toolRow = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(toolSelect);
+      // ボタン行を追加
       const buttonRow = new ActionRowBuilder<ButtonBuilder>().addComponents(searchButton, cancelSearchButton);
+      componentRows.push(buttonRow);
 
-      // コンポーネントをメッセージに設定して更新
-      await interaction.editReply({
-        content: `キーワード「${queryText}」について、カテゴリとツールを選択してください。`,
-        components: [categoryRow, toolRow, buttonRow],
+      // 最終的なコンポーネントでメッセージを更新
+      this.logger.info('作成されたコンポーネント行:', { 
+        count: componentRows.length,
+        componentsJson: JSON.stringify(componentRows.map(row => row.toJSON()), null, 2) // コンポーネント構造をログに出力
       });
+
+      try {
+        await interaction.editReply({
+          content: `キーワード「${queryText}」について、カテゴリとツールを選択してください。\n※複数のカテゴリ・ツールを選択できます（各メニューごとに最大25個まで）`,
+          components: componentRows
+        });
+        this.logger.info('カテゴリとツールの選択メニューを送信しました', { userId: interaction.user.id, messageId });
+      } catch (error) {
+        this.logger.error('選択メニューの送信中に重大なエラーが発生しました', { 
+          error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : JSON.stringify(error),
+          userId: interaction.user.id,
+          messageId,
+          queryText,
+          componentCount: componentRows.length,
+          // 送信しようとしたコンポーネントのJSON表現もログに出力
+          componentsSentJson: JSON.stringify(componentRows.map(row => row.toJSON()), null, 2)
+        });
+        // このエラーはユーザーに直接影響するため、可能であればフォールバックメッセージを送信
+        try {
+          // editReplyが失敗した後なので、followUpで通知
+          // ただし、followUpも失敗する可能性がある（例：インタラクションが完全に終了している）
+          if (interaction.channel) { // channelが存在する場合のみ試行
+            await interaction.followUp({ content: '選択肢の表示中に問題が発生しました。お手数ですが、もう一度コマンドを実行してください。', ephemeral: true });
+          }
+        } catch (followUpError) {
+          this.logger.error('選択メニュー送信エラー後のフォールバックメッセージ送信にも失敗しました', { 
+            originalError: error instanceof Error ? error.message : JSON.stringify(error),
+            followUpError: followUpError instanceof Error ? { name: followUpError.name, message: followUpError.message, stack: followUpError.stack } : JSON.stringify(followUpError)
+          });
+        }
+      }
       
     } catch (error) {
       const appError = this.errorHandler.handle(error);
