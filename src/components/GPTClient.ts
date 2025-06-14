@@ -196,11 +196,13 @@ Tools: ${JSON.stringify(tools)}
    * 検索結果をランク付け
    * @param searchQuery 検索クエリ
    * @param searchResults 検索結果
+   * @param maxReturn 最大返却数
    * @returns ランク付けされた検索結果
    */
   async rankSearchResults(
     searchQuery: SearchQuery,
-    searchResults: SeminarRecord[]
+    searchResults: SeminarRecord[],
+    maxReturn: number = 5
   ): Promise<RankedSeminarRecord[]> {
     if (searchResults.length === 0) {
       return [];
@@ -208,11 +210,7 @@ Tools: ${JSON.stringify(tools)}
     
     if (searchResults.length === 1) {
       // 結果が1つだけの場合は最高スコアを付けて返す
-      return [{
-        ...searchResults[0],
-        score: 1.0,
-        reason: '唯一の検索結果'
-      }];
+      return [{ ...searchResults[0], score: 1.0, reason: '唯一の検索結果' }];
     }
     
     try {
@@ -264,13 +262,13 @@ Tools: ${JSON.stringify(tools)}
           }
         });
 
-        // スコア順にソート
-        return rankedResults.sort((a, b) => b.score - a.score);
+        // スコア順にソートし、上位 maxReturn 件を返す
+        return rankedResults.sort((a, b) => b.score - a.score).slice(0, maxReturn);
       } catch (parseError) {
         this.logger.warn('ランキング結果をJSONとして解析できませんでした', { response });
         
         // フォールバック: 最初の5件をそのまま返す
-        return searchResults.slice(0, 5).map((result, index) => ({
+        return searchResults.slice(0, maxReturn).map((result, index) => ({
           ...result,
           score: 1 - (index * 0.1), // 順番に応じてスコアを下げる
           reason: 'フォールバックランキング'

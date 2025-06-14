@@ -410,11 +410,13 @@ export default class SeminarCommand {
       }
 
       // 検索結果をランク付け
-      const rankedResults = await this.gptClient.rankSearchResults(searchQuery, results);
-      
-      // 環境変数から表示件数を取得するか、デフォルト値を使用
-      const maxResultCount = parseInt(process.env.MAX_RESULT_COUNT || '3', 10);
-      const topResults = rankedResults.slice(0, maxResultCount);
+      const rankedResults = await this.gptClient.rankSearchResults(searchQuery, results, 10);
+
+      // メンション検索は最大10件表示（環境変数 MENTION_MAX_RESULT_COUNT で上書き可）
+      const maxResultCount = parseInt(process.env.MENTION_MAX_RESULT_COUNT || '10', 10);
+
+      // GPT で最大件数取得済みのため、そのまま利用
+      const topResults = rankedResults;
       
       // 結果を整形して返信
       const formattedResponse = this.formatter.formatMentionResults(searchQuery.queryText, topResults);

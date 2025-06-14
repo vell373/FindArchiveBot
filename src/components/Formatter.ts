@@ -141,33 +141,36 @@ export class Formatter {
 
   /**
    * メンション検索専用フォーマッタ（A形式）
-   * 例:
-   * 1. タイトル
-   * 🔗 URL
-   * 📅 開催日: 2024-09-18
-   * 🏷️ カテゴリ: Instagram, ぷち解説
-   * 🔧 ツール: なし
+ * 例:
+ * 1. タイトル
+ * 🔗 URL
+ * 🏷️ カテゴリ: 初心者, 相談会
+ * 🔧 ツール: ChatGPT, Gemini
    */
   public formatMentionResults(query: string, results: RankedSeminarRecord[]): string {
     if (!results || results.length === 0) {
       return `「${query}」に関連するセミナーが見つかりませんでした。`;
     }
 
-    let text = `## 「${query}」の検索結果（${results.length}件）\n\n`;
+    let header = `## 「${query}」の検索結果（${results.length}件）\n\n`;
+    let body = '';
+    const MAX_LEN = 1900;
 
-    results.forEach((r, idx) => {
-      text += `${idx + 1}. ${r.title || '無題のセミナー'}\n`;
-      if (r.url) text += `🔗 ${r.url}\n`;
-      text += `📅 開催日: ${r.eventDate || '日付なし'}\n`;
-      text += `🏷️ カテゴリ: ${(r.categories || []).join(', ') || 'なし'}\n`;
-      text += `🔧 ツール: ${(r.tools || []).join(', ') || 'なし'}\n\n`;
-    });
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      let section = `${i + 1}. ${r.title || '無題のセミナー'}\n`;
+      if (r.url) section += `🔗 ${r.url}\n`;
+      section += `🏷️ カテゴリ: ${(r.categories || []).join(', ') || 'なし'}\n`;
+      section += `🔧 ツール: ${(r.tools || []).join(', ') || 'なし'}\n\n`;
 
-    // 長過ぎる場合はcompact
-    if (text.length > 1900) {
-      text = this.buildCompactResults(query, results);
+      // 追加するとDiscord制限を超えないか確認
+      if ((header.length + body.length + section.length) > MAX_LEN) {
+        break; // これ以上追加出来ない
+      }
+      body += section;
     }
-    return text;
+
+    return header + body;
   }
 
   /**
