@@ -251,6 +251,19 @@ Tools: ${JSON.stringify(tools)}
           }
         }
         
+        // 選択カテゴリ・ツールをすべて含むレコードにボーナス付与
+        const { categories: selCats = [], tools: selTools = [] } = searchQuery;
+        rankedResults.forEach(r => {
+          const catMatch = selCats.length > 0 && selCats.every(c => (r.categories || []).includes(c));
+          const toolMatch = selTools.length > 0 && selTools.every(t => (r.tools || []).includes(t));
+          if (catMatch || toolMatch) {
+            r.score += 0.2; // ボーナス
+          }
+          if (catMatch && toolMatch) {
+            r.score += 0.1; // 両方満たす場合さらに加点
+          }
+        });
+
         // スコア順にソート
         return rankedResults.sort((a, b) => b.score - a.score);
       } catch (parseError) {

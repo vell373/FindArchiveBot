@@ -88,71 +88,77 @@ export default class NotionClient {
     categories: string[] = [],
     tools: string[] = []
   ): Promise<SeminarRecord[]> {
-    try {
-      // フィルタ条件の構築
-      const filter: any = {
-        and: []
-      };
+    const queryOnce = async (strictAnd: boolean) => {
+      const filter: any = { and: [] };
 
-      // カテゴリフィルタ（選択されている場合のみ）
+      // カテゴリフィルタ
       if (categories.length > 0) {
-        // 複数のカテゴリが選択されている場合は、OR条件で検索
-        const categoryFilters = categories.map(category => ({
-          property: 'カテゴリ',
-          multi_select: {
-            contains: category
-          }
-        }));
-
-        filter.and.push({
-          or: categoryFilters
-        });
+        if (strictAnd && categories.length > 1) {
+          // すべてのカテゴリを含むレコードのみ
+          categories.forEach(cat => {
+            filter.and.push({
+              property: 'カテゴリ',
+              multi_select: { contains: cat }
+            });
+          });
+        } else {
+          const orList = categories.map(cat => ({
+            property: 'カテゴリ',
+            multi_select: { contains: cat }
+          }));
+          filter.and.push({ or: orList });
+        }
       }
 
-      // ツールフィルタ（選択されている場合のみ）
+      // ツールフィルタ
       if (tools.length > 0) {
-        // 複数のツールが選択されている場合は、OR条件で検索
-        const toolFilters = tools.map(tool => ({
-          property: '使用ツール',
-          multi_select: {
-            contains: tool
-          }
-        }));
-
-        filter.and.push({
-          or: toolFilters
-        });
+        if (strictAnd && tools.length > 1) {
+          tools.forEach(tool => {
+            filter.and.push({
+              property: '使用ツール',
+              multi_select: { contains: tool }
+            });
+          });
+        } else {
+          const orList = tools.map(tool => ({
+            property: '使用ツール',
+            multi_select: { contains: tool }
+          }));
+          filter.and.push({ or: orList });
+        }
       }
 
       // キーワードフィルタ
       if (keywords.length > 0) {
-        const keywordFilters = keywords.map(keyword => ({
+        const keywordFilters = keywords.map(k => ({
           property: 'title',
-          rich_text: {
-            contains: keyword
-          }
+          rich_text: { contains: k }
         }));
+        filter.and.push({ or: keywordFilters });
+      }
 
-        filter.and.push({
-          or: keywordFilters
+      const resp = await this.client.databases.query({
+        database_id: this.databaseId,
+        filter: filter.and.length > 0 ? filter : undefined,
+        sorts: [{ timestamp: 'last_edited_time', direction: 'descending' }],
+        page_size: 50
+      });
+      return resp.results.map((p: any) => this.convertPageToSeminarRecord(p as PageObjectResponse));
+    };
+    try {
+      // 1. 厳格モード (AND) で検索
+      let results: SeminarRecord[] = await queryOnce(true);
+
+      // 10件未満の場合、緩和モード (OR) で追加取得
+      if (results.length < 10) {
+        const relaxed = await queryOnce(false);
+        const seen = new Set(results.map(r => r.id));
+        relaxed.forEach(r => {
+          if (!seen.has(r.id)) results.push(r);
         });
       }
 
-      // 検索実行
-      const response = await this.client.databases.query({
-        database_id: this.databaseId,
-        filter: filter.and.length > 0 ? filter : undefined,
-        sorts: [
-          {
-            timestamp: 'last_edited_time',
-            direction: 'descending'
-          }
-        ],
-        page_size: 20 // 最大20件取得
-      });
-
-      // 検索結果をSeminarRecordに変換
-      return response.results.map((page: any) => this.convertPageToSeminarRecord(page as PageObjectResponse));
+      return results;
     } catch (error) {
       this.logger.error('検索エラー', { error, keywords, categories, tools });
       throw error;
