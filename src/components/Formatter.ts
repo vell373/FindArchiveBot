@@ -66,10 +66,52 @@ export class Formatter {
         
         formattedText += '\n\n';
       });
+
+      // 文字数制限チェック (Discord は 2000 文字)
+      if (formattedText.length > 1900) {
+        this.logger.warn('メッセージが長すぎるためコンパクト表示に切り替えます', {
+          originalLength: formattedText.length
+        });
+        formattedText = this.buildCompactResults(query, results);
+      }
       
       this.logger.info('検索結果を整形しました', { 
         resultCount: results.length,
         textLength: formattedText.length
+      });
+      
+      return formattedText;
+    } catch (error) {
+      this.errorHandler.handle(error);
+      // エラーが発生した場合でも最低限の情報を返す
+      return JSON.stringify({ 
+        count: results?.length || 0, 
+        error: '結果の整形中にエラーが発生しました',
+        results: results?.map(r => ({ title: r.title })) || []
+      }, null, 2);
+    }
+  }
+
+  /**
+   * 検索結果をコンパクトにフォーマット
+   * @param query - 検索クエリ
+   * @param results - ランク付けされたセミナーレコードの配列
+   * @returns フォーマットされた表示用テキスト
+   */
+  private buildCompactResults(query: string, results: RankedSeminarRecord[]): string {
+    try {
+      // 検索結果がない場合
+      if (!results || results.length === 0) {
+        this.logger.info('検索結果がありません');
+        return `「${query}」に関連するセミナーが見つかりませんでした。別のキーワードで試してみてください。`;
+      }
+
+      // 簡潔なフォーマット（コンパクト用）
+      let formattedText = `「${query}」の検索結果（${results.length}件）:\n\n`;
+      
+      results.forEach((result, index) => {
+        const score = Math.round(result.score * 100);
+        formattedText += `${index + 1}. **${result.title || '無題のセミナー'}** - 関連度: ${score}%\n`;
       });
       
       return formattedText;
@@ -95,6 +137,37 @@ export class Formatter {
     if (text.length <= maxLength) return text;
     
     return text.substring(0, maxLength - 3) + '...';
+  }
+
+  /**
+   * メンション検索専用フォーマッタ（A形式）
+   * 例:
+   * 1. タイトル
+   * 🔗 URL
+   * 📅 開催日: 2024-09-18
+   * 🏷️ カテゴリ: Instagram, ぷち解説
+   * 🔧 ツール: なし
+   */
+  public formatMentionResults(query: string, results: RankedSeminarRecord[]): string {
+    if (!results || results.length === 0) {
+      return `「${query}」に関連するセミナーが見つかりませんでした。`;
+    }
+
+    let text = `## 「${query}」の検索結果（${results.length}件）\n\n`;
+
+    results.forEach((r, idx) => {
+      text += `${idx + 1}. ${r.title || '無題のセミナー'}\n`;
+      if (r.url) text += `🔗 ${r.url}\n`;
+      text += `📅 開催日: ${r.eventDate || '日付なし'}\n`;
+      text += `🏷️ カテゴリ: ${(r.categories || []).join(', ') || 'なし'}\n`;
+      text += `🔧 ツール: ${(r.tools || []).join(', ') || 'なし'}\n\n`;
+    });
+
+    // 長過ぎる場合はcompact
+    if (text.length > 1900) {
+      text = this.buildCompactResults(query, results);
+    }
+    return text;
   }
 
   /**

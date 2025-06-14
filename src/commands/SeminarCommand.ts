@@ -413,11 +413,11 @@ export default class SeminarCommand {
       const rankedResults = await this.gptClient.rankSearchResults(searchQuery, results);
       
       // 環境変数から表示件数を取得するか、デフォルト値を使用
-      const maxResultCount = parseInt(process.env.MAX_RESULT_COUNT || '5', 10);
+      const maxResultCount = parseInt(process.env.MAX_RESULT_COUNT || '3', 10);
       const topResults = rankedResults.slice(0, maxResultCount);
       
       // 結果を整形して返信
-      const formattedResponse = this.formatter.formatSearchResults(searchQuery.queryText, topResults);
+      const formattedResponse = this.formatter.formatMentionResults(searchQuery.queryText, topResults);
       
       await context.updateMessage(formattedResponse);
       
