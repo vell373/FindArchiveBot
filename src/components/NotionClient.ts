@@ -130,10 +130,10 @@ export default class NotionClient {
 
       // キーワードフィルタ
       if (keywords.length > 0) {
-        const keywordFilters = keywords.map(k => ({
-          property: 'title',
-          rich_text: { contains: k }
-        }));
+        const keywordFilters = keywords.flatMap(k => ([
+          { property: 'タイトル', rich_text: { contains: k } },
+          { property: '概要',   rich_text: { contains: k } }
+        ]));
         filter.and.push({ or: keywordFilters });
       }
 
@@ -247,6 +247,11 @@ export default class NotionClient {
       } catch (error) {
         this.logger.error('派生カテゴリ/ツール取得エラー', { error });
       }
+    }
+
+    // カテゴリ・ツールが最終的に空の場合は、キーワードを含めた検索のみを実行（メンション検索で過剰ヒットを防止）
+    if (categories.length === 0 && tools.length === 0) {
+      return await queryPhase(false, true);
     }
 
     try {
