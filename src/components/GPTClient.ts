@@ -4,6 +4,7 @@ import ErrorHandler, { AppError, ErrorType } from '../utils/ErrorHandler';
 import { SeminarRecord, RankedSeminarRecord } from '../models/SeminarRecord';
 import { SearchQuery } from '../models/SearchQuery';
 import PromptManager from '../utils/PromptManager';
+import AliasNormalizer from '../utils/AliasNormalizer';
 
 /**
  * OpenAIのChat Completion APIを利用するためのクラス
@@ -160,14 +161,14 @@ export class GPTClient {
         let keywords: string[] = Array.isArray(raw) ? raw.map(k => String(k)) : [];
 
         // ユーザークエリに実際に含まれる単語だけを残す
-        keywords = keywords.filter(k => queryText.includes(k));
+        keywords = AliasNormalizer.normalizeList(keywords.filter(k => queryText.includes(k)));
 
         if (keywords.length === 0) {
           // フォールバック: クエリ全体を単一キーワードとして使用
           keywords = [queryText.trim()];
         }
 
-        return keywords.slice(0, 5);
+        return AliasNormalizer.normalizeList(keywords).slice(0, 5);
 
       } catch (parseError) {
         this.logger.warn('キーワード抽出の結果をJSONとして解析できませんでした', { response });
@@ -183,7 +184,7 @@ export class GPTClient {
           fallbackKeywords.push(queryText.trim());
         }
 
-        return fallbackKeywords.slice(0, 5);
+        return AliasNormalizer.normalizeList(fallbackKeywords).slice(0, 5);
       }
   
     } catch (error) {
