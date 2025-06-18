@@ -395,8 +395,12 @@ export default class SeminarCommand {
 
       this.logger.info('キーワードを抽出しました', { keywords });
 
-      // Notionで検索
-      const results = await this.notionClient.searchSeminars(keywords, [], []);
+      // Notionで検索 (メンション専用フェーズ方式)
+      const results = await this.notionClient.searchSeminarsPhased(
+        keywords,
+        searchQuery.categories || [],
+        searchQuery.tools || []
+      );
 
       if (results.length === 0) {
         // 代替キーワードを提案

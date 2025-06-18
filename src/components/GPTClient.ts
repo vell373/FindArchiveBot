@@ -140,50 +140,52 @@ export class GPTClient {
     try {
       const { queryText, categories, tools } = searchQuery;
       
-      const prompt = `
-# ROLE
-You are a concise keyword extractor.
-# INPUT
-UserQuery: "${queryText}"
-Categories: ${JSON.stringify(categories)}
-Tools: ${JSON.stringify(tools)}
-# RULES
-- Output a JSON array (max 5 items) of Japanese keywords.
-- Use single- or double-byte words as appropriate.
-- Do NOT add commentary.
-      `;
+      // プロンプトファイルから読み込み
+      let promptTemplate = await PromptManager.getPromptContent('keyword_extractor_prompt.txt');
+      // プレースホルダー置換
+      const prompt = promptTemplate.replace('{QUERY}', queryText.replace(/"/g, '\\"'));
       
       const response = await this.complete(prompt, this.keywordModel);
-      
+
+      // ```json ... ``` のコードブロックで返る場合があるため除去
+      let cleaned = response.trim();
+      if (cleaned.startsWith('```')) {
+        cleaned = cleaned.replace(/^```[a-z]*\n?/i, '').replace(/```$/i, '').trim();
+      }
+
       try {
         // JSONとして解析
-        const keywords = JSON.parse(response);
-        
-        if (Array.isArray(keywords) && keywords.length > 0) {
-          return keywords.slice(0, 5); // 最大5つまで
+        const raw = JSON.parse(cleaned);
+
+        let keywords: string[] = Array.isArray(raw) ? raw.map(k => String(k)) : [];
+
+        // ユーザークエリに実際に含まれる単語だけを残す
+        keywords = keywords.filter(k => queryText.includes(k));
+
+        if (keywords.length === 0) {
+          // フォールバック: クエリ全体を単一キーワードとして使用
+          keywords = [queryText.trim()];
         }
-        
-        throw new Error('キーワード抽出の結果が配列ではありません');
+
+        return keywords.slice(0, 5);
+
       } catch (parseError) {
         this.logger.warn('キーワード抽出の結果をJSONとして解析できませんでした', { response });
-        
-        // フォールバック: 行ごとに分割して処理
-        const fallbackKeywords = response
+
+        // フォールバック: 行ごとに分割し、ユーザークエリに含まれる単語のみ取得
+        const fallbackKeywords = cleaned
           .split(/[\n,\[\]"]/)
           .map(k => k.trim())
-          .filter(k => k.length > 0)
+          .filter(k => k.length > 0 && queryText.includes(k))
           .slice(0, 5);
-        
-        if (fallbackKeywords.length > 0) {
-          return fallbackKeywords;
+
+        if (fallbackKeywords.length === 0) {
+          fallbackKeywords.push(queryText.trim());
         }
-        
-        throw new AppError(
-          ErrorType.VALIDATION_ERROR,
-          'キーワードを抽出できませんでした',
-          parseError instanceof Error ? parseError : undefined
-        );
+
+        return fallbackKeywords.slice(0, 5);
       }
+  
     } catch (error) {
       if (error instanceof AppError) {
         throw error;
