@@ -1,7 +1,7 @@
 # ROLE
 You are a ranking assistant.
 # TASK
-Select the 5 most relevant seminars for the user's intent.
+Select the {TOP_N} most relevant seminars for the user's intent.
 # INPUT
 UserIntent: "{QUERY}"
 Candidates (JSONL):
@@ -10,7 +10,7 @@ Candidates (JSONL):
 Return STRICT JSON:
 [
   {"id":"...","score":0.92,"reason":"..."},
-  ... x5
+  ... up to {TOP_N} items
 ]
 - score is 0–1, higher is better.
 - reason ≤ 40 characters.

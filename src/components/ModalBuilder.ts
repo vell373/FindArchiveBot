@@ -36,7 +36,7 @@ export default class ModalBuilder {
       .setCustomId('queryText')
       .setLabel('検索したいキーワードや質問を入力してください')
       .setStyle(TextInputStyle.Paragraph)
-      .setPlaceholder('例：画像生成AIの活用法について知りたい')
+      .setPlaceholder('例：インスタ、リール、AIライティング...')
       .setRequired(true)
       .setMinLength(2)
       .setMaxLength(200);

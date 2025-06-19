@@ -50,8 +50,7 @@ export default class EmbedBuilder {
       .addFields(
         { name: 'カテゴリ', value: categories.join(', ') || 'なし', inline: true },
         { name: 'ツール', value: tools.join(', ') || 'なし', inline: true }
-      )
-      .setFooter({ text: `関連度: ${Math.round(seminar.score * 100)}% | ${seminar.reason || ''}` });
+      );
     
     // 開催日がある場合は追加
     if (seminar.eventDate) {

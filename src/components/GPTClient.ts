@@ -4,6 +4,7 @@ import ErrorHandler, { AppError, ErrorType } from '../utils/ErrorHandler';
 import { SeminarRecord, RankedSeminarRecord } from '../models/SeminarRecord';
 import { SearchQuery } from '../models/SearchQuery';
 import PromptManager from '../utils/PromptManager';
+import AliasNormalizer from '../utils/AliasNormalizer';
 
 /**
  * OpenAIのChat Completion APIを利用するためのクラス
@@ -18,6 +19,7 @@ export class GPTClient {
   private keywordModel: string;
   private rankingModel: string;
   private maxTokens: number;
+  private temperature: number;
 
   /**
    * GPTClientインスタンスを初期化
@@ -44,12 +46,14 @@ export class GPTClient {
     this.keywordModel = process.env.OPENAI_KEYWORD_MODEL || keywordModel;
     this.rankingModel = process.env.OPENAI_RANKING_MODEL || rankingModel;
     this.maxTokens = process.env.OPENAI_MAX_TOKENS ? parseInt(process.env.OPENAI_MAX_TOKENS) : 4000;
+    this.temperature = process.env.OPENAI_TEMPERATURE ? parseFloat(process.env.OPENAI_TEMPERATURE) : 0.2;
     
     this.logger.info('GPTClientを初期化しました', {
       defaultModel: this.defaultModel,
       keywordModel: this.keywordModel,
       rankingModel: this.rankingModel,
-      maxTokens: this.maxTokens
+      maxTokens: this.maxTokens,
+      temperature: this.temperature
     });
   }
 
@@ -80,7 +84,7 @@ export class GPTClient {
         const response = await this.openai.chat.completions.create({
           model,
           messages: [{ role: 'user', content: prompt }],
-          temperature: 0.2, // 温度パラメーターを下げて出力の一貫性を高める
+          temperature: this.temperature, // 環境変数 OPENAI_TEMPERATURE で上書き可能
           max_tokens: this.maxTokens, // 環境変数から設定された最大トークン数を使用
         });
 
@@ -140,50 +144,63 @@ export class GPTClient {
     try {
       const { queryText, categories, tools } = searchQuery;
       
-      const prompt = `
-# ROLE
-You are a concise keyword extractor.
-# INPUT
-UserQuery: "${queryText}"
-Categories: ${JSON.stringify(categories)}
-Tools: ${JSON.stringify(tools)}
-# RULES
-- Output a JSON array (max 5 items) of Japanese keywords.
-- Use single- or double-byte words as appropriate.
-- Do NOT add commentary.
-      `;
+      // プロンプトファイルから読み込み
+      let promptTemplate = await PromptManager.getPromptContent('keyword_extractor_prompt.txt');
+      // プレースホルダー置換
+      const prompt = promptTemplate.replace('{QUERY}', queryText.replace(/"/g, '\\"'));
       
       const response = await this.complete(prompt, this.keywordModel);
-      
+
+      // ```json ... ``` のコードブロックで返る場合があるため除去
+      let cleaned = response.trim();
+      if (cleaned.startsWith('```')) {
+        cleaned = cleaned.replace(/^```[a-z]*\n?/i, '').replace(/```$/i, '').trim();
+      }
+
       try {
         // JSONとして解析
-        const keywords = JSON.parse(response);
-        
-        if (Array.isArray(keywords) && keywords.length > 0) {
-          return keywords.slice(0, 5); // 最大5つまで
+        const raw = JSON.parse(cleaned);
+
+        let keywords: string[] = Array.isArray(raw) ? raw.map(k => String(k)) : [];
+
+        // ユーザークエリに実際に含まれる単語だけを残す
+        keywords = AliasNormalizer.normalizeList(keywords.filter(k => queryText.includes(k)));
+
+        // フルフレーズも優先的に追加（分割語だけでは埋もれるケースを補完）
+        const fullPhrase = queryText.trim();
+        if (fullPhrase.length > 0 && !keywords.includes(fullPhrase)) {
+          keywords.unshift(fullPhrase);
         }
-        
-        throw new Error('キーワード抽出の結果が配列ではありません');
+
+        if (keywords.length === 0) {
+          // フォールバック: クエリ全体を単一キーワードとして使用
+          keywords = [queryText.trim()];
+        }
+
+        return AliasNormalizer.normalizeList(keywords).slice(0, 5);
+
       } catch (parseError) {
         this.logger.warn('キーワード抽出の結果をJSONとして解析できませんでした', { response });
-        
-        // フォールバック: 行ごとに分割して処理
-        const fallbackKeywords = response
+
+        // フォールバック: 行ごとに分割し、ユーザークエリに含まれる単語のみ取得
+        const fallbackKeywords = cleaned
           .split(/[\n,\[\]"]/)
           .map(k => k.trim())
-          .filter(k => k.length > 0)
+          .filter(k => k.length > 0 && queryText.includes(k))
           .slice(0, 5);
-        
-        if (fallbackKeywords.length > 0) {
-          return fallbackKeywords;
+
+        const fullPhrase = queryText.trim();
+        if (fullPhrase.length > 0 && !fallbackKeywords.includes(fullPhrase)) {
+          fallbackKeywords.unshift(fullPhrase);
         }
-        
-        throw new AppError(
-          ErrorType.VALIDATION_ERROR,
-          'キーワードを抽出できませんでした',
-          parseError instanceof Error ? parseError : undefined
-        );
+
+        if (fallbackKeywords.length === 0) {
+          fallbackKeywords.push(fullPhrase);
+        }
+
+        return AliasNormalizer.normalizeList(fallbackKeywords).slice(0, 5);
       }
+  
     } catch (error) {
       if (error instanceof AppError) {
         throw error;
@@ -196,11 +213,13 @@ Tools: ${JSON.stringify(tools)}
    * 検索結果をランク付け
    * @param searchQuery 検索クエリ
    * @param searchResults 検索結果
+   * @param maxReturn 最大返却数
    * @returns ランク付けされた検索結果
    */
   async rankSearchResults(
     searchQuery: SearchQuery,
-    searchResults: SeminarRecord[]
+    searchResults: SeminarRecord[],
+    maxReturn: number = 5
   ): Promise<RankedSeminarRecord[]> {
     if (searchResults.length === 0) {
       return [];
@@ -208,11 +227,7 @@ Tools: ${JSON.stringify(tools)}
     
     if (searchResults.length === 1) {
       // 結果が1つだけの場合は最高スコアを付けて返す
-      return [{
-        ...searchResults[0],
-        score: 1.0,
-        reason: '唯一の検索結果'
-      }];
+      return [{ ...searchResults[0], score: 1.0, reason: '唯一の検索結果' }];
     }
     
     try {
@@ -225,7 +240,8 @@ Tools: ${JSON.stringify(tools)}
       // プレースホルダーを置換
       const prompt = promptContent
         .replace('{QUERY}', searchQuery.queryText)
-        .replace('{JSONL}', jsonlResults);
+        .replace('{JSONL}', jsonlResults)
+        .replace('{TOP_N}', String(maxReturn));
       
       const response = await this.complete(prompt, this.rankingModel);
       
@@ -251,13 +267,26 @@ Tools: ${JSON.stringify(tools)}
           }
         }
         
-        // スコア順にソート
-        return rankedResults.sort((a, b) => b.score - a.score);
+        // 選択カテゴリ・ツールをすべて含むレコードにボーナス付与
+        const { categories: selCats = [], tools: selTools = [] } = searchQuery;
+        rankedResults.forEach(r => {
+          const catMatch = selCats.length > 0 && selCats.every(c => (r.categories || []).includes(c));
+          const toolMatch = selTools.length > 0 && selTools.every(t => (r.tools || []).includes(t));
+          if (catMatch || toolMatch) {
+            r.score += 0.2; // ボーナス
+          }
+          if (catMatch && toolMatch) {
+            r.score += 0.1; // 両方満たす場合さらに加点
+          }
+        });
+
+        // スコア順にソートし、上位 maxReturn 件を返す
+        return rankedResults.sort((a, b) => b.score - a.score).slice(0, maxReturn);
       } catch (parseError) {
         this.logger.warn('ランキング結果をJSONとして解析できませんでした', { response });
         
         // フォールバック: 最初の5件をそのまま返す
-        return searchResults.slice(0, 5).map((result, index) => ({
+        return searchResults.slice(0, maxReturn).map((result, index) => ({
           ...result,
           score: 1 - (index * 0.1), // 順番に応じてスコアを下げる
           reason: 'フォールバックランキング'
