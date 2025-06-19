@@ -19,6 +19,7 @@ export class GPTClient {
   private keywordModel: string;
   private rankingModel: string;
   private maxTokens: number;
+  private temperature: number;
 
   /**
    * GPTClientインスタンスを初期化
@@ -45,12 +46,14 @@ export class GPTClient {
     this.keywordModel = process.env.OPENAI_KEYWORD_MODEL || keywordModel;
     this.rankingModel = process.env.OPENAI_RANKING_MODEL || rankingModel;
     this.maxTokens = process.env.OPENAI_MAX_TOKENS ? parseInt(process.env.OPENAI_MAX_TOKENS) : 4000;
+    this.temperature = process.env.OPENAI_TEMPERATURE ? parseFloat(process.env.OPENAI_TEMPERATURE) : 0.2;
     
     this.logger.info('GPTClientを初期化しました', {
       defaultModel: this.defaultModel,
       keywordModel: this.keywordModel,
       rankingModel: this.rankingModel,
-      maxTokens: this.maxTokens
+      maxTokens: this.maxTokens,
+      temperature: this.temperature
     });
   }
 
@@ -81,7 +84,7 @@ export class GPTClient {
         const response = await this.openai.chat.completions.create({
           model,
           messages: [{ role: 'user', content: prompt }],
-          temperature: 0.2, // 温度パラメーターを下げて出力の一貫性を高める
+          temperature: this.temperature, // 環境変数 OPENAI_TEMPERATURE で上書き可能
           max_tokens: this.maxTokens, // 環境変数から設定された最大トークン数を使用
         });
 
@@ -163,6 +166,12 @@ export class GPTClient {
         // ユーザークエリに実際に含まれる単語だけを残す
         keywords = AliasNormalizer.normalizeList(keywords.filter(k => queryText.includes(k)));
 
+        // フルフレーズも優先的に追加（分割語だけでは埋もれるケースを補完）
+        const fullPhrase = queryText.trim();
+        if (fullPhrase.length > 0 && !keywords.includes(fullPhrase)) {
+          keywords.unshift(fullPhrase);
+        }
+
         if (keywords.length === 0) {
           // フォールバック: クエリ全体を単一キーワードとして使用
           keywords = [queryText.trim()];
@@ -180,8 +189,13 @@ export class GPTClient {
           .filter(k => k.length > 0 && queryText.includes(k))
           .slice(0, 5);
 
+        const fullPhrase = queryText.trim();
+        if (fullPhrase.length > 0 && !fallbackKeywords.includes(fullPhrase)) {
+          fallbackKeywords.unshift(fullPhrase);
+        }
+
         if (fallbackKeywords.length === 0) {
-          fallbackKeywords.push(queryText.trim());
+          fallbackKeywords.push(fullPhrase);
         }
 
         return AliasNormalizer.normalizeList(fallbackKeywords).slice(0, 5);
