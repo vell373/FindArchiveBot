@@ -226,7 +226,8 @@ export class GPTClient {
       // プレースホルダーを置換
       const prompt = promptContent
         .replace('{QUERY}', searchQuery.queryText)
-        .replace('{JSONL}', jsonlResults);
+        .replace('{JSONL}', jsonlResults)
+        .replace('{TOP_N}', String(maxReturn));
       
       const response = await this.complete(prompt, this.rankingModel);
       
