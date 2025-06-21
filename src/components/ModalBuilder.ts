@@ -34,7 +34,7 @@ export default class ModalBuilder {
 
     const queryInput = new TextInputBuilder()
       .setCustomId('queryText')
-      .setLabel('検索したいキーワードや質問を入力してください')
+      .setLabel('検索したいキーワードを入力してください')
       .setStyle(TextInputStyle.Paragraph)
       .setPlaceholder('例：インスタ、リール、AIライティング...')
       .setRequired(true)
